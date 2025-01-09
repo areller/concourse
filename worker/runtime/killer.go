@@ -52,7 +52,7 @@ type Killer interface {
 
 // killer terminates the processes exec'ed in a task.
 //
-// Only processes created through `task.Exec` are targetted to receive the the
+// Only processes created through `task.Exec` are targetted to receive the
 // first signals it delivers.
 type killer struct {
 	gracePeriod   time.Duration
@@ -135,7 +135,7 @@ func (k killer) gracefullyKill(ctx context.Context, task containerd.Task) (bool,
 	return true, nil
 }
 
-// killTaskProcesses delivers a signal to every live process that has been
+// killTaskExecedProcesses delivers a signal to every live process that has been
 // created through a `task.Exec`.
 func (k killer) killTaskExecedProcesses(ctx context.Context, task containerd.Task, signal syscall.Signal) error {
 	procs, err := taskExecedProcesses(ctx, task)
@@ -151,7 +151,7 @@ func (k killer) killTaskExecedProcesses(ctx context.Context, task containerd.Tas
 	return nil
 }
 
-// taskProcesses retrieves a task's processes.
+// taskExecedProcesses retrieves a task's processes.
 func taskExecedProcesses(ctx context.Context, task containerd.Task) ([]containerd.Process, error) {
 	pids, err := task.Pids(context.Background())
 	if err != nil {

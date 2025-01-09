@@ -14,8 +14,8 @@ import (
 	"github.com/concourse/concourse/tracing"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"go.opentelemetry.io/otel/oteltest"
-	"go.opentelemetry.io/otel/trace"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 var _ = Describe("Scheduler", func() {
@@ -403,7 +403,7 @@ var _ = Describe("Scheduler", func() {
 						fakeJob.HasNewInputsReturns(false)
 					})
 
-					It("doesn't mark the the job as not having new inputs again", func() {
+					It("doesn't mark the job as not having new inputs again", func() {
 						Expect(fakeJob.SetHasNewInputsCallCount()).To(Equal(0))
 					})
 				})
@@ -423,7 +423,9 @@ var _ = Describe("Scheduler", func() {
 				fakeBuildStarter.TryStartPendingBuildsForJobReturns(false, nil)
 				fakeJob.SaveNextInputMappingReturns(nil)
 
-				tracing.ConfigureTraceProvider(oteltest.NewTracerProvider())
+				exporter := tracetest.NewInMemoryExporter()
+				tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+				tracing.ConfigureTraceProvider(tp)
 
 				ctx, _ = tracing.StartSpan(context.Background(), "scheduler.Run", nil)
 				inputCtx1, _ = tracing.StartSpan(context.Background(), "checker.Run", nil)
@@ -458,11 +460,11 @@ var _ = Describe("Scheduler", func() {
 
 			It("starts a linked span", func() {
 				pendingBuildCtx := fakeJob.EnsurePendingBuildExistsArgsForCall(0)
-				span := tracing.FromContext(pendingBuildCtx).(*oteltest.Span)
-				Expect(span.Links()).To(ConsistOf(trace.Link{
+				span := tracing.FromContext(pendingBuildCtx).(sdktrace.ReadOnlySpan)
+				Expect(span.Links()).To(ConsistOf(sdktrace.Link{
 					SpanContext: tracing.FromContext(ctx).SpanContext(),
 				}))
-				Expect(span.ParentSpanID()).To(Equal(tracing.FromContext(inputCtx1).SpanContext().SpanID()))
+				Expect(span.Parent().SpanID()).To(Equal(tracing.FromContext(inputCtx1).SpanContext().SpanID()))
 			})
 		})
 

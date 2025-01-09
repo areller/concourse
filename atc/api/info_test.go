@@ -108,7 +108,7 @@ var _ = Describe("Pipelines API", func() {
 				fakeAccess.IsAuthenticatedReturns(true)
 				fakeAccess.IsAdminReturns(true)
 
-				ssmAccess := ssm.NewSsm(lager.NewLogger("ssm_test"), &mockService, nil)
+				ssmAccess := ssm.NewSsm(lager.NewLogger("ssm_test"), &mockService, nil, "")
 				ssmManager := &ssm.SsmManager{
 					AwsAccessKeyID:         "",
 					AwsSecretAccessKey:     "",
@@ -140,6 +140,7 @@ var _ = Describe("Pipelines API", func() {
 							"method": "GetParameter"
 						},
 						"pipeline_secret_template": "pipeline-secret-template",
+            "shared_path": "",
 						"team_secret_template": "team-secret-template"
           }
         }`))
@@ -165,6 +166,7 @@ var _ = Describe("Pipelines API", func() {
 							"method": "GetParameter"
 						},
 						"pipeline_secret_template": "pipeline-secret-template",
+            "shared_path": "",
 						"team_secret_template": "team-secret-template"
           }
         }`))
@@ -270,12 +272,12 @@ var _ = Describe("Pipelines API", func() {
 			"namespace": "testnamespace",
             "ca_cert": "",
             "server_name": "server-name",
-						"auth_backend": "backend-server",
-						"auth_max_ttl": 20,
-						"auth_retry_max": 5,
-						"auth_retry_initial": 2,
-						"health": {
-							"response": {
+			"auth_backend": "backend-server",
+			"auth_max_ttl": 20,
+			"auth_retry_max": 5,
+			"auth_retry_initial": 2,
+			"health": {
+				"response": {
                   "initialized": true,
                   "sealed": false,
                   "standby": false,
@@ -283,10 +285,14 @@ var _ = Describe("Pipelines API", func() {
                   "replication_performance_mode": "foo",
                   "replication_dr_mode": "blah",
                   "server_time_utc": 0,
-                  "version": "1.0.0"
+                  "version": "1.0.0",
+				  "enterprise": false,
+				  "echo_duration_ms": 0,
+				  "clock_skew_ms": 0,
+				  "replication_primary_canary_age_ms": 0
                 },
                 "method": "/v1/sys/health"
-						}
+			}
           }
         }`))
 				})
