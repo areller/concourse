@@ -2,7 +2,7 @@ package dbtest
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -87,7 +87,7 @@ type Builder struct {
 	WorkerTaskCacheFactory db.WorkerTaskCacheFactory
 }
 
-func NewBuilder(conn db.Conn, lockFactory lock.LockFactory) Builder {
+func NewBuilder(conn db.DbConn, lockFactory lock.LockFactory) Builder {
 	logger := lagertest.NewTestLogger("dummy-logger")
 	return Builder{
 		TeamFactory:            db.NewTeamFactory(conn, lockFactory),
@@ -619,7 +619,7 @@ func (builder Builder) WithNextInputMapping(jobName string, inputs JobInputs) Se
 			mapping[input.Name] = db.InputResult{
 				Input: &db.AlgorithmInput{
 					AlgorithmVersion: db.AlgorithmVersion{
-						Version:    db.ResourceVersion(md5Version(i.Version)),
+						Version:    db.ResourceVersion(sha256Version(i.Version)),
 						ResourceID: input.ResourceID,
 					},
 					FirstOccurrence: i.FirstOccurrence,
@@ -977,7 +977,7 @@ func (builder Builder) WithEnabledVersion(resourceName string, enabledVersion at
 	}
 }
 
-func (builder Builder) WithBaseResourceType(dbConn db.Conn, resourceTypeName string) SetupFunc {
+func (builder Builder) WithBaseResourceType(dbConn db.DbConn, resourceTypeName string) SetupFunc {
 	return func(scenario *Scenario) error {
 		setupTx, err := dbConn.Begin()
 		if err != nil {
@@ -1006,13 +1006,13 @@ func unique(kind string) string {
 	return kind + "-" + id.String()
 }
 
-func md5Version(version atc.Version) string {
+func sha256Version(version atc.Version) string {
 	versionJSON, err := json.Marshal(version)
 	if err != nil {
 		panic(err)
 	}
 
-	hasher := md5.New()
+	hasher := sha256.New()
 	hasher.Write([]byte(versionJSON))
 	return hex.EncodeToString(hasher.Sum(nil))
 }

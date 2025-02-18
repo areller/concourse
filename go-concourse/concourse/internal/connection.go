@@ -16,10 +16,6 @@ import (
 	"github.com/vito/go-sse/sse"
 )
 
-//go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
-
-//counterfeiter:generate . Connection
-
 // Deprecated. Use HTTPAgent instead
 type Connection interface {
 	URL() string
@@ -204,7 +200,8 @@ func (connection *connection) populateResponse(response *http.Response, returnRe
 	}
 
 	if response.StatusCode == http.StatusForbidden {
-		return ErrForbidden
+		body, _ := io.ReadAll(response.Body)
+		return ForbiddenError{Reason: string(body)}
 	}
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {

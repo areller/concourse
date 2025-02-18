@@ -88,14 +88,15 @@ import (
 	_ "github.com/concourse/concourse/atc/creds/secretsmanager"
 	_ "github.com/concourse/concourse/atc/creds/ssm"
 	_ "github.com/concourse/concourse/atc/creds/vault"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const algorithmLimitRows = 100
 
 var schedulerCache = gocache.New(10*time.Second, 10*time.Second)
 
-var defaultDriverName = "postgres"
-var retryingDriverName = "too-many-connections-retrying"
+var defaultDriverName = "pgx"
 
 var flyClientID = "fly"
 var flyClientSecret = "Zmx5"
@@ -148,6 +149,7 @@ type RunCommand struct {
 
 	GlobalResourceCheckTimeout          time.Duration `long:"global-resource-check-timeout" default:"1h" description:"Time limit on checking for new versions of resources."`
 	ResourceCheckingInterval            time.Duration `long:"resource-checking-interval" default:"1m" description:"Interval on which to check for new versions of resources."`
+	ResourceTypeCheckingInterval        time.Duration `long:"resource-type-checking-interval" default:"1m" description:"Interval on which to check for new versions of resource types."`
 	ResourceWithWebhookCheckingInterval time.Duration `long:"resource-with-webhook-checking-interval" default:"1m" description:"Interval on which to check for new versions of resources that has webhook defined."`
 	MaxChecksPerSecond                  int           `long:"max-checks-per-second" description:"Maximum number of checks that can be started per second. If not specified, this will be calculated as (# of resources)/(resource checking interval). -1 value will remove this maximum limit of checks per second."`
 	PausePipelinesAfter                 int           `long:"pause-pipelines-after" default:"0" description:"The number of days after which a pipeline will be automatically paused if none of its jobs have run in more than the given number of days. A value of zero disables this component."`
@@ -526,9 +528,11 @@ func (cmd *RunCommand) Runner(positionalArguments []string) (ifrit.Runner, error
 	startTime := time.Now()
 
 	commandSession.Info("start")
-	defer commandSession.Info("finish", lager.Data{
-		"duration": time.Since(startTime),
-	})
+	defer func() {
+		commandSession.Info("finish", lager.Data{
+			"duration": time.Since(startTime),
+		})
+	}()
 
 	atc.EnableGlobalResources = cmd.FeatureFlags.EnableGlobalResources
 	atc.EnableRedactSecrets = cmd.FeatureFlags.EnableRedactSecrets
@@ -539,6 +543,7 @@ func (cmd *RunCommand) Runner(positionalArguments []string) (ifrit.Runner, error
 	atc.EnableResourceCausality = cmd.FeatureFlags.EnableResourceCausality
 	atc.DefaultCheckInterval = cmd.ResourceCheckingInterval
 	atc.DefaultWebhookInterval = cmd.ResourceWithWebhookCheckingInterval
+	atc.DefaultResourceTypeInterval = cmd.ResourceTypeCheckingInterval
 
 	if cmd.BaseResourceTypeDefaults.Path() != "" {
 		content, err := os.ReadFile(cmd.BaseResourceTypeDefaults.Path())
@@ -559,14 +564,6 @@ func (cmd *RunCommand) Runner(positionalArguments []string) (ifrit.Runner, error
 	if err != nil {
 		return nil, err
 	}
-
-	//FIXME: These only need to run once for the entire binary. At the moment,
-	//they rely on state of the command.
-	db.SetupConnectionRetryingDriver(
-		"postgres",
-		cmd.Postgres.ConnectionString(),
-		retryingDriverName,
-	)
 
 	// Register the sink that collects error metrics
 	if cmd.Metrics.CaptureErrorMetrics {
@@ -599,29 +596,29 @@ func (cmd *RunCommand) Runner(positionalArguments []string) (ifrit.Runner, error
 		return nil, err
 	}
 
-	lockConns, err := constructLockConns(retryingDriverName, cmd.Postgres.ConnectionString())
+	lockConns, err := constructLockConns(defaultDriverName, cmd.Postgres.ConnectionString())
 	if err != nil {
 		return nil, err
 	}
 
 	lockFactory := lock.NewLockFactory(lockConns, metric.LogLockAcquired, metric.LogLockReleased)
 
-	apiConn, err := cmd.constructDBConn(retryingDriverName, logger, cmd.APIMaxOpenConnections, cmd.APIMaxOpenConnections/2, "api", lockFactory)
+	apiConn, err := cmd.constructDBConn(defaultDriverName, logger, cmd.APIMaxOpenConnections, cmd.APIMaxOpenConnections/2, "api", lockFactory)
 	if err != nil {
 		return nil, err
 	}
 
-	backendConn, err := cmd.constructDBConn(retryingDriverName, logger, cmd.BackendMaxOpenConnections, cmd.BackendMaxOpenConnections/2, "backend", lockFactory)
+	backendConn, err := cmd.constructDBConn(defaultDriverName, logger, cmd.BackendMaxOpenConnections, cmd.BackendMaxOpenConnections/2, "backend", lockFactory)
 	if err != nil {
 		return nil, err
 	}
 
-	gcConn, err := cmd.constructDBConn(retryingDriverName, logger, 5, 2, "gc", lockFactory)
+	gcConn, err := cmd.constructDBConn(defaultDriverName, logger, 5, 2, "gc", lockFactory)
 	if err != nil {
 		return nil, err
 	}
 
-	workerConn, err := cmd.constructDBConn(retryingDriverName, logger, 1, 1, "worker", lockFactory)
+	workerConn, err := cmd.constructDBConn(defaultDriverName, logger, 1, 1, "worker", lockFactory)
 	if err != nil {
 		return nil, err
 	}
@@ -692,10 +689,10 @@ func (cmd *RunCommand) Runner(positionalArguments []string) (ifrit.Runner, error
 func (cmd *RunCommand) constructMembers(
 	logger lager.Logger,
 	reconfigurableSink *lager.ReconfigurableSink,
-	apiConn db.Conn,
-	workerConn db.Conn,
-	backendConn db.Conn,
-	gcConn db.Conn,
+	apiConn db.DbConn,
+	workerConn db.DbConn,
+	backendConn db.DbConn,
+	gcConn db.DbConn,
 	storage storage.Storage,
 	lockFactory lock.LockFactory,
 	secretManager creds.Secrets,
@@ -787,8 +784,8 @@ func (cmd *RunCommand) constructMembers(
 func (cmd *RunCommand) constructAPIMembers(
 	logger lager.Logger,
 	reconfigurableSink *lager.ReconfigurableSink,
-	dbConn db.Conn,
-	workerConn db.Conn,
+	dbConn db.DbConn,
+	workerConn db.DbConn,
 	storage storage.Storage,
 	lockFactory lock.LockFactory,
 	secretManager creds.Secrets,
@@ -1011,7 +1008,7 @@ func (cmd *RunCommand) constructAPIMembers(
 
 func (cmd *RunCommand) backendComponents(
 	logger lager.Logger,
-	dbConn db.Conn,
+	dbConn db.DbConn,
 	lockFactory lock.LockFactory,
 	secretManager creds.Secrets,
 	policyChecker policy.Checker,
@@ -1102,6 +1099,15 @@ func (cmd *RunCommand) backendComponents(
 				"newValue": cmd.ResourceCheckingInterval,
 			})
 		cmd.ResourceWithWebhookCheckingInterval = cmd.ResourceCheckingInterval
+	}
+
+	if cmd.ResourceTypeCheckingInterval < cmd.ResourceCheckingInterval {
+		logger.Info("update-resource-type-checking-interval",
+			lager.Data{
+				"oldValue": cmd.ResourceTypeCheckingInterval,
+				"newValue": cmd.ResourceCheckingInterval,
+			})
+		cmd.ResourceTypeCheckingInterval = cmd.ResourceCheckingInterval
 	}
 
 	components := []RunnableComponent{
@@ -1216,7 +1222,7 @@ func (cmd *RunCommand) streamer(cacheFactory db.ResourceCacheFactory) worker.Str
 	)
 }
 
-func (cmd *RunCommand) constructPool(dbConn db.Conn, lockFactory lock.LockFactory, workerCache *db.WorkerCache) (worker.Pool, error) {
+func (cmd *RunCommand) constructPool(dbConn db.DbConn, lockFactory lock.LockFactory, workerCache *db.WorkerCache) (worker.Pool, error) {
 	dbResourceCacheFactory := db.NewResourceCacheFactory(dbConn, lockFactory)
 	dbWorkerBaseResourceTypeFactory := db.NewWorkerBaseResourceTypeFactory(dbConn)
 	dbTaskCacheFactory := db.NewTaskCacheFactory(dbConn)
@@ -1256,7 +1262,7 @@ func (cmd *RunCommand) constructPool(dbConn db.Conn, lockFactory lock.LockFactor
 
 func (cmd *RunCommand) gcComponents(
 	logger lager.Logger,
-	gcConn db.Conn,
+	gcConn db.DbConn,
 	lockFactory lock.LockFactory,
 ) ([]RunnableComponent, error) {
 	dbWorkerLifecycle := db.NewWorkerLifecycle(gcConn)
@@ -1496,7 +1502,7 @@ func (tripper mitmRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 	return tripper.RoundTripper.RoundTrip(req)
 }
 
-func (cmd *RunCommand) tlsConfig(logger lager.Logger, dbConn db.Conn) (*tls.Config, error) {
+func (cmd *RunCommand) tlsConfig(logger lager.Logger, dbConn db.DbConn) (*tls.Config, error) {
 	tlsConfig := atc.DefaultTLSConfig()
 
 	if cmd.isTLSEnabled() {
@@ -1666,7 +1672,7 @@ func (cmd *RunCommand) constructDBConn(
 	idleConns int,
 	connectionName string,
 	lockFactory lock.LockFactory,
-) (db.Conn, error) {
+) (db.DbConn, error) {
 	dbConn, err := db.Open(logger.Session("db"), driverName, cmd.Postgres.ConnectionString(), cmd.newKey(), cmd.oldKey(), connectionName, lockFactory)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %s", err)

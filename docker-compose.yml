@@ -1,5 +1,11 @@
-version: '3'
-
+networks:
+  default:
+    enable_ipv6: true
+    ipam:
+      driver: default
+      config:
+        - subnet: fdf1:f4a2:d53::/64
+          gateway: fdf1:f4a2:d53::ffff
 services:
   db:
     image: postgres:${POSTGRES_TAG:-latest}
@@ -9,13 +15,23 @@ services:
       POSTGRES_DB: concourse
       POSTGRES_USER: dev
       POSTGRES_PASSWORD: dev
+      POSTGRES_HOST_AUTH_METHOD: ${AUTH_METHOD:-trust}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
 
   web:
     build: .
     image: concourse/concourse:local
     command: web
-    depends_on: [db]
+    depends_on:
+      db:
+        condition: service_healthy
     ports: [8080:8080]
+    networks:
+      - default
     volumes:
     - .:/src
     - "./hack/keys:/concourse-keys"
@@ -43,6 +59,11 @@ services:
     image: concourse/concourse:local
     command: worker
     privileged: true
+    cgroup: host
+    networks:
+      - default
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
     depends_on: [web]
     ports:
     - 7777:7777

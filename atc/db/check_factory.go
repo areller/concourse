@@ -45,7 +45,7 @@ type CheckFactory interface {
 }
 
 type checkFactory struct {
-	conn        Conn
+	conn        DbConn
 	lockFactory lock.LockFactory
 
 	secrets       creds.Secrets
@@ -58,7 +58,7 @@ type checkFactory struct {
 }
 
 func NewCheckFactory(
-	conn Conn,
+	conn DbConn,
 	lockFactory lock.LockFactory,
 	secrets creds.Secrets,
 	varSourcePool creds.VarSourcePool,
@@ -81,7 +81,6 @@ func NewCheckFactory(
 
 func (c *checkFactory) TryCreateCheck(ctx context.Context, checkable Checkable, resourceTypes ResourceTypes, from atc.Version, manuallyTriggered bool, skipIntervalRecursively bool, toDB bool) (Build, bool, error) {
 	logger := lagerctx.FromContext(ctx)
-
 	sourceDefaults := atc.Source{}
 	parentType, found := resourceTypes.Parent(checkable)
 	if found {
@@ -103,6 +102,10 @@ func (c *checkFactory) TryCreateCheck(ctx context.Context, checkable Checkable, 
 
 	if checkable.CheckEvery() != nil {
 		interval = *checkable.CheckEvery()
+	}
+
+	if _, ok := checkable.(ResourceType); ok && checkable.CheckEvery() == nil {
+		interval.Interval = atc.DefaultResourceTypeInterval
 	}
 
 	skipInterval := manuallyTriggered

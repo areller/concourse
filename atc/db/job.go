@@ -10,12 +10,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
+
 	"code.cloudfoundry.org/lager/v3"
 	sq "github.com/Masterminds/squirrel"
 	"github.com/concourse/concourse/atc"
 	"github.com/concourse/concourse/atc/db/lock"
 	"github.com/concourse/concourse/tracing"
-	"github.com/lib/pq"
 )
 
 type InputConfigs []InputConfig
@@ -94,6 +97,7 @@ type Job interface {
 	UpdateFirstLoggedBuildID(newFirstLoggedBuildID int) error
 	EnsurePendingBuildExists(context.Context) error
 	GetPendingBuilds() ([]Build, error)
+	LatestCompletedBuildId() (int, error)
 
 	GetNextBuildInputs() ([]BuildInput, error)
 	GetFullNextBuildInputs() ([]BuildInput, bool, error)
@@ -164,7 +168,7 @@ type job struct {
 	nonce     *string
 }
 
-func newEmptyJob(conn Conn, lockFactory lock.LockFactory) *job {
+func newEmptyJob(conn DbConn, lockFactory lock.LockFactory) *job {
 	return &job{pipelineRef: pipelineRef{conn: conn, lockFactory: lockFactory}}
 }
 
@@ -222,6 +226,18 @@ func (j *job) ScheduleRequestedTime() time.Time { return j.scheduleRequestedTime
 func (j *job) MaxInFlight() int                 { return j.maxInFlight }
 func (j *job) DisableManualTrigger() bool       { return j.disableManualTrigger }
 
+func (j *job) LatestCompletedBuildId() (int, error) {
+	var id int
+	err := psql.Select("latest_completed_build_id").
+		Where(sq.Eq{"id": j.id}).
+		From("jobs").
+		RunWith(j.conn).
+		QueryRow().
+		Scan(&id)
+
+	return id, err
+}
+
 func (j *job) Config() (atc.JobConfig, error) {
 	if j.config != nil {
 		return *j.config, nil
@@ -249,7 +265,7 @@ func (j *job) Config() (atc.JobConfig, error) {
 }
 
 func (j *job) AlgorithmInputs() (InputConfigs, error) {
-	rows, err := psql.Select("ji.name", "ji.resource_id", "array_agg(ji.passed_job_id)", "ji.version", "rp.version", "ji.trigger").
+	rows, err := psql.Select("ji.name", "ji.resource_id", "array_remove(array_agg(ji.passed_job_id), NULL)", "ji.version", "rp.version", "ji.trigger").
 		From("job_inputs ji").
 		LeftJoin("resource_pins rp ON rp.resource_id = ji.resource_id").
 		Where(sq.Eq{
@@ -263,14 +279,15 @@ func (j *job) AlgorithmInputs() (InputConfigs, error) {
 	}
 
 	var inputs InputConfigs
+	m := pgtype.NewMap()
 	for rows.Next() {
-		var passedJobs []sql.NullInt64
+		var passedJobs []int64
 		var configVersionString, pinnedVersionString sql.NullString
 		var inputName string
 		var resourceID int
 		var trigger bool
 
-		err = rows.Scan(&inputName, &resourceID, pq.Array(&passedJobs), &configVersionString, &pinnedVersionString, &trigger)
+		err = rows.Scan(&inputName, &resourceID, m.SQLScanner(&passedJobs), &configVersionString, &pinnedVersionString, &trigger)
 		if err != nil {
 			return nil, err
 		}
@@ -306,9 +323,7 @@ func (j *job) AlgorithmInputs() (InputConfigs, error) {
 
 		passed := make(JobSet)
 		for _, s := range passedJobs {
-			if s.Valid {
-				passed[int(s.Int64)] = true
-			}
+			passed[int(s)] = true
 		}
 
 		if len(passed) > 0 {
@@ -322,7 +337,7 @@ func (j *job) AlgorithmInputs() (InputConfigs, error) {
 }
 
 func (j *job) Inputs() ([]atc.JobInput, error) {
-	rows, err := psql.Select("ji.name", "r.name", "array_agg(p.name ORDER BY p.id)", "ji.trigger", "ji.version").
+	rows, err := psql.Select("ji.name", "r.name", "array_remove(array_agg(p.name ORDER BY p.id), NULL)", "ji.trigger", "ji.version").
 		From("job_inputs ji").
 		Join("resources r ON r.id = ji.resource_id").
 		LeftJoin("jobs p ON p.id = ji.passed_job_id").
@@ -337,13 +352,14 @@ func (j *job) Inputs() ([]atc.JobInput, error) {
 	}
 
 	var inputs []atc.JobInput
+	m := pgtype.NewMap()
 	for rows.Next() {
-		var passedString []sql.NullString
+		var passed []string
 		var versionString sql.NullString
 		var inputName, resourceName string
 		var trigger bool
 
-		err = rows.Scan(&inputName, &resourceName, pq.Array(&passedString), &trigger, &versionString)
+		err = rows.Scan(&inputName, &resourceName, m.SQLScanner(&passed), &trigger, &versionString)
 		if err != nil {
 			return nil, err
 		}
@@ -357,11 +373,8 @@ func (j *job) Inputs() ([]atc.JobInput, error) {
 			}
 		}
 
-		var passed []string
-		for _, s := range passedString {
-			if s.Valid {
-				passed = append(passed, s.String)
-			}
+		if len(passed) == 0 {
+			passed = nil
 		}
 
 		inputs = append(inputs, atc.JobInput{
@@ -894,7 +907,7 @@ func (j *job) RerunBuild(buildToRerun Build, createdBy string) (Build, error) {
 	for {
 		rerunBuild, err := j.tryRerunBuild(buildToRerun, createdBy)
 		if err != nil {
-			if pqErr, ok := err.(*pq.Error); ok && pqErr.Code.Name() == pqUniqueViolationErrCode {
+			if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == pgerrcode.UniqueViolation {
 				continue
 			}
 
@@ -1198,12 +1211,12 @@ func (j *job) SaveNextInputMapping(inputMapping InputMapping, inputsDetermined b
 	}
 
 	builder := psql.Insert("next_build_inputs").
-		Columns("input_name", "job_id", "version_md5", "resource_id", "first_occurrence", "resolve_error")
+		Columns("input_name", "job_id", "version_sha256", "resource_id", "first_occurrence", "resolve_error")
 
 	for inputName, inputResult := range inputMapping {
 		var resolveError sql.NullString
 		var firstOccurrence sql.NullBool
-		var versionMD5 sql.NullString
+		var versionSHA256 sql.NullString
 		var resourceID sql.NullInt64
 
 		if inputResult.ResolveError != "" {
@@ -1215,10 +1228,10 @@ func (j *job) SaveNextInputMapping(inputMapping InputMapping, inputsDetermined b
 
 			firstOccurrence = sql.NullBool{Bool: inputResult.Input.FirstOccurrence, Valid: true}
 			resourceID = sql.NullInt64{Int64: int64(inputResult.Input.ResourceID), Valid: true}
-			versionMD5 = sql.NullString{String: string(inputResult.Input.Version), Valid: true}
+			versionSHA256 = sql.NullString{String: string(inputResult.Input.Version), Valid: true}
 		}
 
-		builder = builder.Values(inputName, j.id, versionMD5, resourceID, firstOccurrence, resolveError)
+		builder = builder.Values(inputName, j.id, versionSHA256, resourceID, firstOccurrence, resolveError)
 	}
 
 	if len(inputMapping) != 0 {
@@ -1321,7 +1334,7 @@ func (j *job) getNextBuildInputs(tx Tx) ([]BuildInput, error) {
 	rows, err := psql.Select("i.input_name, i.first_occurrence, i.resource_id, v.version, i.resolve_error, v.span_context").
 		From("next_build_inputs i").
 		LeftJoin("resources r ON r.id = i.resource_id").
-		LeftJoin("resource_config_versions v ON v.version_md5 = i.version_md5 AND r.resource_config_scope_id = v.resource_config_scope_id").
+		LeftJoin("resource_config_versions v ON v.version_sha256 = i.version_sha256 AND r.resource_config_scope_id = v.resource_config_scope_id").
 		Where(sq.Eq{
 			"i.job_id": j.id,
 		}).
@@ -1422,7 +1435,8 @@ func scanJob(j *job, row scannable) error {
 		pausedAt             sql.NullTime
 	)
 
-	err := row.Scan(&j.id, &j.name, &config, &j.paused, &j.public, &j.firstLoggedBuildID, &j.pipelineID, &j.pipelineName, &pipelineInstanceVars, &j.teamID, &j.teamName, &nonce, pq.Array(&j.tags), &j.hasNewInputs, &j.scheduleRequestedTime, &j.maxInFlight, &j.disableManualTrigger, &pausedBy, &pausedAt)
+	m := pgtype.NewMap()
+	err := row.Scan(&j.id, &j.name, &config, &j.paused, &j.public, &j.firstLoggedBuildID, &j.pipelineID, &j.pipelineName, &pipelineInstanceVars, &j.teamID, &j.teamName, &nonce, m.SQLScanner(&j.tags), &j.hasNewInputs, &j.scheduleRequestedTime, &j.maxInFlight, &j.disableManualTrigger, &pausedBy, &pausedAt)
 	if err != nil {
 		return err
 	}
@@ -1453,7 +1467,7 @@ func scanJob(j *job, row scannable) error {
 	return nil
 }
 
-func scanJobs(conn Conn, lockFactory lock.LockFactory, rows *sql.Rows) (Jobs, error) {
+func scanJobs(conn DbConn, lockFactory lock.LockFactory, rows *sql.Rows) (Jobs, error) {
 	defer Close(rows)
 
 	jobs := Jobs{}

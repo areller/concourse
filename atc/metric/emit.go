@@ -40,7 +40,7 @@ type Monitor struct {
 	emissions        chan eventEmission
 	emitterFactories []EmitterFactory
 
-	Databases       []db.Conn
+	Databases       []db.DbConn
 	DatabaseQueries Counter
 
 	ContainersCreated Counter
@@ -61,6 +61,7 @@ type Monitor struct {
 	CheckBuildsStarted Counter
 	CheckBuildsRunning Gauge
 
+	JobStatuses  map[JobStatusLabels]*Gauge
 	StepsWaiting map[StepsWaitingLabels]*Gauge
 
 	// When global resource is not enabled, ChecksStarted should equal to CheckBuildsStarted.

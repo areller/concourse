@@ -11,7 +11,8 @@ import (
 	"github.com/concourse/concourse/tracing"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"go.opentelemetry.io/otel/oteltest"
+	"go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 var _ = Describe("Job", func() {
@@ -352,6 +353,34 @@ var _ = Describe("Job", func() {
 				OldID: 57,
 				NewID: 56,
 			}))
+		})
+	})
+
+	Describe("LatestCompletedBuildId", func() {
+		var (
+			someJob db.Job
+			build   db.Build
+			err     error
+		)
+
+		BeforeEach(func() {
+			var found bool
+			someJob, found, err = pipeline.Job("some-job")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+
+			build, err = someJob.CreateBuild(defaultBuildCreatedBy)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("fetches latest completed build id on a job", func() {
+			By("finishing the build")
+			err = build.Finish(db.BuildStatusFailed)
+			Expect(err).NotTo(HaveOccurred())
+
+			latestCompletedBuildId, err := someJob.LatestCompletedBuildId()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(latestCompletedBuildId).To(Equal(build.ID()))
 		})
 	})
 
@@ -1440,7 +1469,7 @@ var _ = Describe("Job", func() {
 					"some-input-1": db.InputResult{
 						Input: &db.AlgorithmInput{
 							AlgorithmVersion: db.AlgorithmVersion{
-								Version:    db.ResourceVersion(convertToMD5(versions[0].Version)),
+								Version:    db.ResourceVersion(convertToSHA256(versions[0].Version)),
 								ResourceID: scenario.Resource("some-resource").ID(),
 							},
 							FirstOccurrence: false,
@@ -1450,7 +1479,7 @@ var _ = Describe("Job", func() {
 					"some-input-2": db.InputResult{
 						Input: &db.AlgorithmInput{
 							AlgorithmVersion: db.AlgorithmVersion{
-								Version:    db.ResourceVersion(convertToMD5(versions[1].Version)),
+								Version:    db.ResourceVersion(convertToSHA256(versions[1].Version)),
 								ResourceID: scenario.Resource("some-resource").ID(),
 							},
 							FirstOccurrence: false,
@@ -1460,7 +1489,7 @@ var _ = Describe("Job", func() {
 					"some-input-3": db.InputResult{
 						Input: &db.AlgorithmInput{
 							AlgorithmVersion: db.AlgorithmVersion{
-								Version:    db.ResourceVersion(convertToMD5(versions[2].Version)),
+								Version:    db.ResourceVersion(convertToSHA256(versions[2].Version)),
 								ResourceID: scenario.Resource("some-resource").ID(),
 							},
 							FirstOccurrence: false,
@@ -1579,7 +1608,7 @@ var _ = Describe("Job", func() {
 				"some-input-1": db.InputResult{
 					Input: &db.AlgorithmInput{
 						AlgorithmVersion: db.AlgorithmVersion{
-							Version:    db.ResourceVersion(convertToMD5(versions[0].Version)),
+							Version:    db.ResourceVersion(convertToSHA256(versions[0].Version)),
 							ResourceID: scenarioPipeline1.Resource("some-resource").ID(),
 						},
 						FirstOccurrence: false,
@@ -1589,7 +1618,7 @@ var _ = Describe("Job", func() {
 				"some-input-2": db.InputResult{
 					Input: &db.AlgorithmInput{
 						AlgorithmVersion: db.AlgorithmVersion{
-							Version:    db.ResourceVersion(convertToMD5(versions[1].Version)),
+							Version:    db.ResourceVersion(convertToSHA256(versions[1].Version)),
 							ResourceID: scenarioPipeline1.Resource("some-resource").ID(),
 						},
 						FirstOccurrence: true,
@@ -1604,7 +1633,7 @@ var _ = Describe("Job", func() {
 				"some-input-3": db.InputResult{
 					Input: &db.AlgorithmInput{
 						AlgorithmVersion: db.AlgorithmVersion{
-							Version:    db.ResourceVersion(convertToMD5(versions[2].Version)),
+							Version:    db.ResourceVersion(convertToSHA256(versions[2].Version)),
 							ResourceID: scenarioPipeline2.Resource("some-resource").ID(),
 						},
 						FirstOccurrence: false,
@@ -1641,7 +1670,7 @@ var _ = Describe("Job", func() {
 				"some-input-2": db.InputResult{
 					Input: &db.AlgorithmInput{
 						AlgorithmVersion: db.AlgorithmVersion{
-							Version:    db.ResourceVersion(convertToMD5(versions[2].Version)),
+							Version:    db.ResourceVersion(convertToSHA256(versions[2].Version)),
 							ResourceID: scenarioPipeline1.Resource("some-resource").ID(),
 						},
 						FirstOccurrence: false,
@@ -1651,7 +1680,7 @@ var _ = Describe("Job", func() {
 				"some-input-3": db.InputResult{
 					Input: &db.AlgorithmInput{
 						AlgorithmVersion: db.AlgorithmVersion{
-							Version:    db.ResourceVersion(convertToMD5(versions[2].Version)),
+							Version:    db.ResourceVersion(convertToSHA256(versions[2].Version)),
 							ResourceID: scenarioPipeline1.Resource("some-resource").ID(),
 						},
 						FirstOccurrence: true,
@@ -2000,7 +2029,9 @@ var _ = Describe("Job", func() {
 
 			Context("when tracing is configured", func() {
 				BeforeEach(func() {
-					tracing.ConfigureTraceProvider(oteltest.NewTracerProvider())
+					exporter := tracetest.NewInMemoryExporter()
+					tp := trace.NewTracerProvider(trace.WithSyncer(exporter))
+					tracing.ConfigureTraceProvider(tp)
 				})
 
 				AfterEach(func() {

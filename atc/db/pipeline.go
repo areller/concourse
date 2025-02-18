@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"github.com/lib/pq"
 	"time"
 
 	"code.cloudfoundry.org/lager/v3"
@@ -147,7 +146,7 @@ type pipeline struct {
 	archived      bool
 	lastUpdated   time.Time
 
-	conn        Conn
+	conn        DbConn
 	lockFactory lock.LockFactory
 }
 
@@ -176,7 +175,7 @@ var pipelinesQuery = psql.Select(`
 	From("pipelines p").
 	LeftJoin("teams t ON p.team_id = t.id")
 
-func newPipeline(conn Conn, lockFactory lock.LockFactory) *pipeline {
+func newPipeline(conn DbConn, lockFactory lock.LockFactory) *pipeline {
 	return &pipeline{
 		conn:        conn,
 		lockFactory: lockFactory,
@@ -331,7 +330,7 @@ func (p *pipeline) ResourceVersion(resourceConfigVersionID int) (atc.ResourceVer
 		NOT EXISTS (
 			SELECT 1
 			FROM resource_disabled_versions d, resources r
-			WHERE v.version_md5 = d.version_md5
+			WHERE v.version_sha256 = d.version_sha256
 			AND r.resource_config_scope_id = v.resource_config_scope_id
 			AND r.id = d.resource_id
 		)`
@@ -368,7 +367,7 @@ func (p *pipeline) ResourceVersion(resourceConfigVersionID int) (atc.ResourceVer
 func (p *pipeline) GetBuildsWithVersionAsInput(resourceID, resourceConfigVersionID int) ([]Build, error) {
 	rows, err := buildsQuery.
 		Join("build_resource_config_version_inputs bi ON bi.build_id = b.id").
-		Join("resource_config_versions rcv ON rcv.version_md5 = bi.version_md5").
+		Join("resource_config_versions rcv ON rcv.version_sha256 = bi.version_sha256").
 		Where(sq.Eq{
 			"rcv.id":         resourceConfigVersionID,
 			"bi.resource_id": resourceID,
@@ -396,7 +395,7 @@ func (p *pipeline) GetBuildsWithVersionAsInput(resourceID, resourceConfigVersion
 func (p *pipeline) GetBuildsWithVersionAsOutput(resourceID, resourceConfigVersionID int) ([]Build, error) {
 	rows, err := buildsQuery.
 		Join("build_resource_config_version_outputs bo ON bo.build_id = b.id").
-		Join("resource_config_versions rcv ON rcv.version_md5 = bo.version_md5").
+		Join("resource_config_versions rcv ON rcv.version_sha256 = bo.version_sha256").
 		Where(sq.Eq{
 			"rcv.id":         resourceConfigVersionID,
 			"bo.resource_id": resourceID,
@@ -798,10 +797,10 @@ func (p *pipeline) LoadDebugVersionsDB() (*atc.DebugVersionsDB, error) {
 	rows, err := psql.Select("v.id, v.check_order, r.id, v.resource_config_scope_id, o.build_id, b.job_id").
 		From("build_resource_config_version_outputs o").
 		Join("builds b ON b.id = o.build_id").
-		Join("resource_config_versions v ON v.version_md5 = o.version_md5").
+		Join("resource_config_versions v ON v.version_sha256 = o.version_sha256").
 		Join("resources r ON r.id = o.resource_id").
 		Where(sq.Expr("r.resource_config_scope_id = v.resource_config_scope_id")).
-		Where(sq.Expr("(r.id, v.version_md5) NOT IN (SELECT resource_id, version_md5 from resource_disabled_versions)")).
+		Where(sq.Expr("(r.id, v.version_sha256) NOT IN (SELECT resource_id, version_sha256 from resource_disabled_versions)")).
 		Where(sq.Eq{
 			"b.status":      BuildStatusSucceeded,
 			"r.pipeline_id": p.id,
@@ -830,10 +829,10 @@ func (p *pipeline) LoadDebugVersionsDB() (*atc.DebugVersionsDB, error) {
 	rows, err = psql.Select("v.id, v.check_order, r.id, v.resource_config_scope_id, i.build_id, i.name, b.job_id, b.status = 'succeeded'").
 		From("build_resource_config_version_inputs i").
 		Join("builds b ON b.id = i.build_id").
-		Join("resource_config_versions v ON v.version_md5 = i.version_md5").
+		Join("resource_config_versions v ON v.version_sha256 = i.version_sha256").
 		Join("resources r ON r.id = i.resource_id").
 		Where(sq.Expr("r.resource_config_scope_id = v.resource_config_scope_id")).
-		Where(sq.Expr("(r.id, v.version_md5) NOT IN (SELECT resource_id, version_md5 from resource_disabled_versions)")).
+		Where(sq.Expr("(r.id, v.version_sha256) NOT IN (SELECT resource_id, version_sha256 from resource_disabled_versions)")).
 		Where(sq.Eq{
 			"r.pipeline_id": p.id,
 			"r.active":      true,
@@ -872,12 +871,12 @@ func (p *pipeline) LoadDebugVersionsDB() (*atc.DebugVersionsDB, error) {
 	rows, err = psql.Select("v.id, v.check_order, r.id, v.resource_config_scope_id").
 		From("resource_config_versions v").
 		Join("resources r ON r.resource_config_scope_id = v.resource_config_scope_id").
-		LeftJoin("resource_disabled_versions d ON d.resource_id = r.id AND d.version_md5 = v.version_md5").
+		LeftJoin("resource_disabled_versions d ON d.resource_id = r.id AND d.version_sha256 = v.version_sha256").
 		Where(sq.Eq{
-			"r.pipeline_id": p.id,
-			"r.active":      true,
-			"d.resource_id": nil,
-			"d.version_md5": nil,
+			"r.pipeline_id":    p.id,
+			"r.active":         true,
+			"d.resource_id":    nil,
+			"d.version_sha256": nil,
 		}).
 		RunWith(tx).
 		Query()
@@ -999,12 +998,10 @@ func (p *pipeline) DeleteBuildEventsByBuildIDs(buildIDs []int) error {
 
 	defer Rollback(tx)
 
-	a := pq.Array(buildIDs)
-
 	_, err = tx.Exec(`
    DELETE FROM `+p.eventsTable()+`
 	 WHERE build_id = ANY($1)
-	 `, a)
+	 `, buildIDs)
 	if err != nil {
 		return err
 	}
@@ -1013,7 +1010,7 @@ func (p *pipeline) DeleteBuildEventsByBuildIDs(buildIDs []int) error {
 		UPDATE builds
 		SET reap_time = now()
 		WHERE id = ANY($1)
-	`, a)
+	`, buildIDs)
 	if err != nil {
 		return err
 	}
@@ -1208,7 +1205,7 @@ func getNewBuildNameForJob(tx Tx, jobName string, pipelineID int) (string, int, 
 	return buildName, jobID, err
 }
 
-func resources(pipelineID int, conn Conn, lockFactory lock.LockFactory) (Resources, error) {
+func resources(pipelineID int, conn DbConn, lockFactory lock.LockFactory) (Resources, error) {
 	rows, err := resourcesQuery.
 		Where(sq.Eq{"r.pipeline_id": pipelineID}).
 		OrderBy("r.name").

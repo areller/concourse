@@ -31,11 +31,11 @@ type ResourceCacheFactory interface {
 }
 
 type resourceCacheFactory struct {
-	conn        Conn
+	conn        DbConn
 	lockFactory lock.LockFactory
 }
 
-func NewResourceCacheFactory(conn Conn, lockFactory lock.LockFactory) ResourceCacheFactory {
+func NewResourceCacheFactory(conn DbConn, lockFactory lock.LockFactory) ResourceCacheFactory {
 	return &resourceCacheFactory{
 		conn:        conn,
 		lockFactory: lockFactory,
@@ -77,7 +77,7 @@ func (f *resourceCacheFactory) FindOrCreateResourceCache(
 			"resource_config_id": rc.id,
 			"params_hash":        paramsHash(params),
 		}).
-		Where(sq.Expr("version_md5 = md5(?)", cacheVersion)).
+		Where(sq.Expr("version_sha256 = encode(digest(?, 'sha256'), 'hex')", cacheVersion)).
 		Suffix("FOR SHARE").
 		RunWith(tx).
 		QueryRow().
@@ -95,20 +95,20 @@ func (f *resourceCacheFactory) FindOrCreateResourceCache(
 			Columns(
 				"resource_config_id",
 				"version",
-				"version_md5",
+				"version_sha256",
 				"params_hash",
 			).
 			Values(
 				rc.id,
 				cacheVersion,
-				sq.Expr("md5(?)", cacheVersion),
+				sq.Expr("encode(digest(?, 'sha256'), 'hex')", cacheVersion),
 				paramsHash(params),
 			).
 			Suffix(`
-				ON CONFLICT (resource_config_id, version_md5, params_hash) DO UPDATE SET
+				ON CONFLICT (resource_config_id, version_sha256, params_hash) DO UPDATE SET
 				resource_config_id = EXCLUDED.resource_config_id,
 				version = EXCLUDED.version,
-				version_md5 = EXCLUDED.version_md5,
+				version_sha256 = EXCLUDED.version_sha256,
 				params_hash = EXCLUDED.params_hash
 				RETURNING id
 			`).
@@ -211,7 +211,7 @@ func (f *resourceCacheFactory) FindResourceCacheByID(id int) (ResourceCache, boo
 	return findResourceCacheByID(tx, id, f.lockFactory, f.conn)
 }
 
-func findResourceCacheByID(tx Tx, resourceCacheID int, lock lock.LockFactory, conn Conn) (ResourceCache, bool, error) {
+func findResourceCacheByID(tx Tx, resourceCacheID int, lock lock.LockFactory, conn DbConn) (ResourceCache, bool, error) {
 	var rcID int
 	var versionBytes string
 
